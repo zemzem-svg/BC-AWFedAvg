@@ -32,11 +32,7 @@ blockchain_awfedavg/
 └── requirements.txt
 ```
 
-**Files NOT included** (removed as superseded):
-- `blockchain_awfedavg_integration.py` — old stub that never used real AWFedAvg
-- `complete_blockchain_fl_example.py`  — old example with commented-out imports
 
----
 
 ## Architecture
 
