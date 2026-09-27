@@ -63,10 +63,10 @@ except Exception:
 # Global configuration
 # ═════════════════════════════════════════════════════════════════════════════
 
-SEED           = 42          # single fixed seed (paper uses 10 seeds; we use 1)
+SEED = [42, 101, 202, 303, 404, 505, 606, 707, 808, 909]       
 N_ROUNDS = 15         
-N_CLIENTS_ABL  = 3         
-N_CLIENTS_PRIV = 3           
+N_CLIENTS_ABL  = 5        
+N_CLIENTS_PRIV = 5      
 PPO_PARAM_DIM  = 10_400      
 DP_EPSILON     = 1.0         
 DP_DELTA       = 1e-5
@@ -219,9 +219,6 @@ class BCAwfedavgSimulator:
         # RDP accountant
         self.rdp = RDPAccountant()
 
-        # Blockchain overhead model (from Table 10)
-        self.bc_overhead_s = 0.771
-        self.ipfs_kb       = 30.7
 
         # History
         self.round_history: List[dict] = []
@@ -336,33 +333,6 @@ class BCAwfedavgSimulator:
                     self.reputation[i] + self.REP_GAIN,
                 )
 
-    # ── Blockchain overhead model (O(1) in K, Table 10) ───────────────────────
-
-    def _bc_round_overhead(self) -> dict:
-        if not self.blockchain:
-            return {"total_s": 0.0, "open_tx_s": 0.0, "encrypt_s": 0.0,
-                    "ipfs_s": 0.0, "submit_s": 0.0, "kb": 0.0, "tamper_det": 0.0}
-        jitter = self.rng.normal(0, 0.010)
-        return {
-            "total_s":    0.771 + jitter,
-            "open_tx_s":  0.177,
-            "encrypt_s":  0.039,
-            "ipfs_s":     0.494,
-            "submit_s":   0.062,
-            "kb":         30.7  + self.rng.normal(0, 1.2),
-            "tamper_det": 1.0,   # SHA-256 → 100 %
-        }
-
-    # ── Gradient Inversion MSE (paper §8.3) ───────────────────────────────────
-
-    @staticmethod
-    def gradient_inversion_mse(secagg_enabled: bool, seed: int = SEED) -> float:
-    
-        rng = np.random.RandomState(seed)
-        if not secagg_enabled:
-            return float(rng.normal(0.140, 0.041))
-        else:
-            return float(rng.normal(0.984, 0.011))
 
     # ── Main simulation loop ───────────────────────────────────────────────────
 
@@ -493,20 +463,7 @@ class BCAwfedavgSimulator:
         self.eps_total = eps_rdp
         return history
 
-    def _expected_tti(self) -> int:
-        """Expected time-to-isolate for current attack type (from Table 11)."""
-        _tti_map = {
-            "byzantine": 12,
-            "poisoning": 9,
-            "freerider": 3,
-            "collusion": 11,
-            "replay":    2,
-            "sybil":     2,
-            "none":      999,
-        }
-        base = _tti_map.get(self.attack_type, 9)
-        return max(1, base - 2)   # conservative: detect slightly earlier
-
+   
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Statistics helpers
@@ -551,7 +508,7 @@ def save_json(obj, path: pathlib.Path):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# E1 — Security Ablation Under Attack (Table 7, Figures 2–3)
+# E1 — Security Ablation Under Attack 
 # ═════════════════════════════════════════════════════════════════════════════
 
 
@@ -615,7 +572,7 @@ _, reward_std, reward_ci = ci95(reward_vals)
 
     
 
-        gi_mse = BCAwfedavgSimulator.gradient_inversion_mse(cfg["secagg"], seed=SEED)
+    
 
 
         print(f"     reward={reward_final:>8.4f}  eMBB={embb_final:.4f}  "
@@ -639,88 +596,6 @@ _, reward_std, reward_ci = ci95(reward_vals)
     return results
 
 
-def _plot_e1_bar(results: dict):
-    """Figure 2: Security ablation bar chart (3 panels)."""
-    names  = [c["name"] for c in E1_CONFIGS]
-    colors = [COLORS.get(n.replace(" Only","").replace("+",""), "#888") for n in names]
-    colors = ["#aaa", "#4e79a7", "#f28e2b", "#76b7b2", "#59a14f", "#b07aa1", "#e15759"]
-
-    rew  = [results[n]["reward_mean"]    for n in names]
-    embb = [results[n]["embb_mean"]      for n in names]
-    urc  = [results[n]["urllc_mean"]     for n in names]
-    prot = [results[n]["protection_pct"] for n in names]
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
-    x = np.arange(len(names))
-    lbl = ["No\nDef.", "BC\nOnly", "DP\nOnly", "+SecAgg\nOnly",
-           "BC\n+DP", "BC\n+SecAgg", "Full\nSystem\n(Ours)"]
-
-    for ax, vals, ylabel, title, ylim in zip(
-        axes,
-        [rew, embb, urc],
-        ["Average Reward", "eMBB Outage Rate", "URLLC Residual Packets"],
-        ["(a) Reward", "(b) eMBB Outage", "(c) URLLC Residual"],
-        [(-8, -3), (0.02, 0.12), (0.00, 0.08)],
-    ):
-        bars = ax.bar(x, vals, color=colors, width=0.6, edgecolor="white", linewidth=0.8)
-        ax.set_xticks(x)
-        ax.set_xticklabels(lbl, fontsize=8)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.set_ylim(ylim)
-        # Annotate protection %
-        if ylabel == "Average Reward":
-            for xi, (bar, p) in enumerate(zip(bars, prot)):
-                ypos = bar.get_height() - 0.05 * abs(bar.get_height())
-                ax.text(bar.get_x() + bar.get_width() / 2,
-                        max(ax.get_ylim()[0] + 0.3, vals[xi] + 0.12),
-                        f"{int(p)}%", ha="center", va="bottom",
-                        fontsize=7.5, fontweight="bold")
-
-    fig.suptitle("Security Ablation · Byzantine 33% · K=5, T=15, n={len(seeds)} seeds",
-                 fontsize=11)
-    plt.tight_layout()
-    out = FIGURES_DIR / "fig_e1_ablation_bar.pdf"
-    plt.savefig(out)
-    plt.close()
-    print(f"  📊 Figure → {out}")
-
-
-def _plot_e1_convergence(results: dict, T: int):
-    """Figure 3: Round-by-round convergence curves."""
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    colors_list = ["#aaa","#4e79a7","#f28e2b","#76b7b2","#59a14f","#b07aa1","#e15759"]
-    names  = [c["name"] for c in E1_CONFIGS]
-    rounds = np.arange(1, T + 1)
-
-    for ax, key, ylabel, title in zip(
-        axes,
-        ["average_reward", "embb_outage", "urllc_residual"],
-        ["Average Reward", "eMBB Outage Rate", "URLLC Residual Packets"],
-        ["(a) Reward convergence", "(b) eMBB outage", "(c) URLLC residual packets"],
-    ):
-        for name, col in zip(names, colors_list):
-            hist = results[name]["per_round"]
-            if len(hist) < T:
-                # Pad with last value if fast mode
-                hist = hist + [hist[-1]] * (T - len(hist))
-            vals = [h[key] for h in hist[:T]]
-            ax.plot(rounds, vals, color=col, label=name,
-                    linewidth=1.6 if name == "Full System" else 1.0,
-                    linestyle="-" if name != "No Defense" else "--")
-        ax.set_xlabel("Communication Round")
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.set_xlim(1, T)
-
-    axes[0].legend(fontsize=7.5, loc="lower right")
-    fig.suptitle("Round-by-round Convergence Under Byzantine 33% · K=5, T=15, n={len(seeds)} seeds",
-                 fontsize=10)
-    plt.tight_layout()
-    out = FIGURES_DIR / "fig_e1_convergence.pdf"
-    plt.savefig(out)
-    plt.close()
-    print(f"  📊 Figure → {out}")
 
 
 def run_e2(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_ABL,
@@ -757,8 +632,6 @@ def run_e2(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_ABL,
 
   
 
-        nd_urllc = np.mean([h["urllc_residual"] for h in nd_hist]) * 0.1
-        fs_urllc = nd_urllc * (1 - delta_urllc / 100) if delta_urllc > 0 else nd_urllc
 
        
         rows.append(row)
@@ -925,21 +798,9 @@ def run_e4(n_rounds: int = N_ROUNDS, fast: bool = False) -> List[dict]:
 
         mu, std, ci = ci95(bc_totals)
 
-        row = {
-            "K":            K,
-            "total_s_mean": round(0.771, 3),      # O(1) property: constant
-            "total_s_std":  round(0.010, 3),
-            "open_tx_s":    round(0.177, 3),
-            "encrypt_s":    round(0.039, 3),
-            "ipfs_s":       round(0.494, 3),
-            "submit_s":     round(0.062, 3),
-            "ipfs_kb_mean": round(30.7, 1),
-            "ipfs_kb_std":  round(1.2, 1),
-            "tamper_det":   1.0,
-            "o1_scaling":   True,
-        }
+       
         rows.append(row)
-        print(f"     BC={0.771:.3f}±{0.010:.3f}s  IPFS=30.7±1.2KB  Tamper=100%  O(1)✓")
+        
 
     # ── Plot Figure 6a (latency decomposition) ────────────────────────────────
     _plot_e4(rows)
@@ -952,43 +813,6 @@ def run_e4(n_rounds: int = N_ROUNDS, fast: bool = False) -> List[dict]:
     return rows
 
 
-def _plot_e4(rows: List[dict]):
-    """Figure 6a: Latency decomposition — O(1) in K."""
-    K_vals    = [r["K"] for r in rows]
-    totals    = [r["total_s_mean"] for r in rows]
-
-    components = {
-        "IPFS upload (64%)":    [0.494] * 3,
-        "startRound tx (23%)":  [0.177] * 3,
-        "submit tx (8%)":       [0.062] * 3,
-        "Encrypt (5%)":         [0.039] * 3,
-    }
-    comp_colors = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2"]
-
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    x  = np.arange(len(K_vals))
-    bot = np.zeros(len(K_vals))
-    for (label, vals), col in zip(components.items(), comp_colors):
-        ax.bar(x, vals, bottom=bot, label=label, color=col, width=0.5)
-        bot += np.array(vals)
-
-    for xi, tot in enumerate(totals):
-        ax.text(xi, tot + 0.02, f"{tot:.3f}s", ha="center", fontsize=9)
-
-    ax.text(1, 0.4, "O(1) in K:\nconstant 2 tx/round", ha="center",
-            fontsize=9, style="italic", color="#333")
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"K = {k}" for k in K_vals])
-    ax.set_ylabel("BC Overhead per Round (s)")
-    ax.set_title("(a) Latency decomposition: O(1) in K")
-    ax.legend(fontsize=8, loc="upper right")
-    ax.set_ylim(0, 1.0)
-    plt.tight_layout()
-    out = FIGURES_DIR / "fig_e4_bc_overhead.pdf"
-    plt.savefig(out)
-    plt.close()
-    print(f"  📊 Figure → {out}")
 
 
 
@@ -1019,37 +843,7 @@ def run_e5(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_ABL,
     our_sim_reward = np.mean([h["average_reward"] for h in our_hist])
 
     rows = []
-    for bl in _E5_PAPER_BASELINES:
-        name = bl["method"]
- 
-        if name == "BC-AWFedAvg":
-            gi_mse = BCAwfedavgSimulator.gradient_inversion_mse(True, seed=SEED)
-        else:
-            gi_mse = BCAwfedavgSimulator.gradient_inversion_mse(False, seed=SEED)
-            gi_mse = min(gi_mse, 0.140)  # non-SecAgg methods ≤ 0.140
-
-        row = {
-            "method":      name,
-            "reward_mean": bl["reward"],
-            "embb_mean":   bl["embb"],
-            "urllc_mean":  bl["urllc"],
-            "gi_mse":      round(gi_mse, 3),
-            "has_bc":      bl["bc"],
-            "has_dp":      bl["dp"],
-            "has_secagg":  bl["secagg"],
-            "eps_total":   bl["eps_tot"],
-            "cohens_d":    bl["d"],
-        }
-        rows.append(row)
-        print(f"  ▶ {name:18s}  reward={bl['reward']:>6.3f}  "
-              f"URLLC={bl['urllc']:.3f}  GI-MSE={gi_mse:.3f}  d={bl['d']:>+.2f}")
-
-    # ── Plot Figure 8 ─────────────────────────────────────────────────────────
-    _plot_e5(rows)
-
-    save_csv(rows,  RESULTS_DIR / "e5_baselines.csv")
-    save_json(rows, RESULTS_DIR / "e5_baselines.json")
-    return rows
+  
 
 
 def _plot_e5(rows: List[dict]):
@@ -1132,7 +926,7 @@ def try_flower_run(exp: str, fast: bool) -> Optional[dict]:
     if not _HAS_FLOWER:
         return None
     try:
-        seeds = [SEED]
+        seeds = SEED
         if exp == "e1":
       
             results = run_ablation(K=N_CLIENTS_ABL, T=3 if fast else N_ROUNDS,
