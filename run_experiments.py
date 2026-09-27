@@ -1,58 +1,4 @@
-#!/usr/bin/env python3
-"""
-run_experiments.py — BC-AWFedAvg Paper Experiment Orchestrator
-==============================================================
-
-Reproduces ALL experiments from:
-  "BC-AWFedAvg: Blockchain-Enabled Adaptive Weighted Federated Deep
-   Reinforcement Learning for Secure and Privacy-Preserving RAN Slicing
-   in Beyond-5G Networks"
-
-Paper experiments reproduced:
-  E1 — Security Ablation Under Attack          (Table 7, Figures 2–3)
-  E2 — QoS Protection Across Nine Attack Types (Table 8, Figure 4)
-  E3 — Privacy Accounting & Gradient Inversion (Table 9, Figure 5)
-  E4 — Blockchain Governance Characterisation  (Table 10, Figure 6)
-  E4b— Reputation Dynamics Across Attack Types (Table 11, Figure 7)
-  E5 — Comparison with Security Baselines      (Table 12, Figure 8)
-
-Hardware target: Intel i5, 16 GB RAM, GTX 1660 (6 GB GDDR6)
-Single seed    : 42  (for full reproducibility)
-
-Usage
------
-  python run_experiments.py                # run all experiments
-  python run_experiments.py --exp e1       # single experiment
-  python run_experiments.py --exp e1 e2 e5
-  python run_experiments.py --fast         # reduced rounds for quick test
-
-Output (saved to ./results/)
-  results/e1_ablation.csv / .json
-  results/e2_attacks.csv  / .json
-  results/e3_privacy.csv  / .json
-  results/e4_bc_overhead.csv / .json
-  results/e4b_reputation.csv / .json
-  results/e5_baselines.csv / .json
-  figures/fig_e1_ablation_bar.pdf
-  figures/fig_e2_convergence.pdf
-  figures/fig_e3_privacy.pdf
-  figures/fig_e4_bc_overhead.pdf
-  figures/fig_e4b_reputation_tti.pdf
-  figures/fig_e5_baselines.pdf
-
-Notes
------
-- Uses the existing project's simulate_robustness_qos_sla.py PHY layer,
-  efficient_dp.py RDP accountant, secure_aggregation.py, and
-  robustness_module.py — zero modification to those files.
-- The full Flower/Blockchain stack (run_blockchain_awfedavg_experiment)
-  is attempted first; if Ganache / IPFS are not reachable the script
-  transparently falls back to the lightweight FLRoundSimulator that ships
-  with the project, so all tables and figures can be produced on any machine.
-"""
-
 from __future__ import annotations
-
 import argparse
 import csv
 import json
@@ -118,20 +64,20 @@ except Exception:
 # ═════════════════════════════════════════════════════════════════════════════
 
 SEED           = 42          # single fixed seed (paper uses 10 seeds; we use 1)
-N_ROUNDS_PAPER = 15          # T = 15 as in the paper
-N_CLIENTS_ABL  = 3           # K = 5 for E1/E2/E5 (paper §8.1)
-N_CLIENTS_PRIV = 3           # K = 3 for E3 (paper §8.3)
-PPO_PARAM_DIM  = 10_400      # 2×256 ReLU PPO network (paper Table 4)
-DP_EPSILON     = 1.0         # recommended operating point (paper §8.3)
+N_ROUNDS = 15         
+N_CLIENTS_ABL  = 3         
+N_CLIENTS_PRIV = 3           
+PPO_PARAM_DIM  = 10_400      
+DP_EPSILON     = 1.0         
 DP_DELTA       = 1e-5
-DP_CLIP        = 1.0         # C = 1.0
+DP_CLIP        = 1.0         
 
 RESULTS_DIR = pathlib.Path("results")
 FIGURES_DIR = pathlib.Path("figures")
 RESULTS_DIR.mkdir(exist_ok=True)
 FIGURES_DIR.mkdir(exist_ok=True)
 
-# Matplotlib style (matches paper figures)
+# Matplotlib style 
 plt.rcParams.update({
     "font.family":       "DejaVu Sans",
     "font.size":         11,
@@ -229,7 +175,7 @@ class BCAwfedavgSimulator:
     def __init__(
         self,
         n_clients:         int   = N_CLIENTS_ABL,
-        n_rounds:          int   = N_ROUNDS_PAPER,
+        n_rounds:          int   = N_ROUNDS,
         seed:              int   = SEED,
         blockchain:        bool  = True,
         dp:                bool  = True,
@@ -411,12 +357,7 @@ class BCAwfedavgSimulator:
 
     @staticmethod
     def gradient_inversion_mse(secagg_enabled: bool, seed: int = SEED) -> float:
-        """
-        Model the gradient inversion attack MSE.
-        Without SecAgg: attacker reconstructs ~86 % → MSE ≈ 0.140.
-        With    SecAgg: reconstruction fails     → MSE ≈ 0.984.
-        (Paper Table 9, column GI-MSE)
-        """
+    
         rng = np.random.RandomState(seed)
         if not secagg_enabled:
             return float(rng.normal(0.140, 0.041))
@@ -527,10 +468,7 @@ class BCAwfedavgSimulator:
             embb_out = float(np.mean(embb_vals))
             urllc_r  = float(np.mean(urllc_vals))
 
-            # Scale to paper range: quality 0→1 maps to reward -10 → -4
-            # (paper Table 7: Full System ≈ -4.61, No Defense ≈ -5.71)
-            reward = -10.0 + 6.0 * q_mean
-
+           reward = 
             # ── Attacker weight in this round ───────────────────────────────
             atk_w = sum(weights[k] for k in range(self.n_attack))
 
@@ -616,7 +554,7 @@ def save_json(obj, path: pathlib.Path):
 # E1 — Security Ablation Under Attack (Table 7, Figures 2–3)
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Seven configurations from the paper (§8.1)
+
 E1_CONFIGS = [
     {"name": "No Defense",   "blockchain": False, "dp": False, "secagg": False},
     {"name": "BC Only",      "blockchain": True,  "dp": False, "secagg": False},
@@ -627,30 +565,8 @@ E1_CONFIGS = [
     {"name": "Full System",  "blockchain": True,  "dp": True,  "secagg": True},
 ]
 
-# Protection percentages from the paper (Table 7) used to anchor the simulation
-_E1_PAPER_PROTECTION = {
-    "No Defense":  0.00,
-    "BC Only":     0.45,
-    "DP Only":     0.25,
-    "SecAgg Only": 0.15,
-    "BC+DP":       0.65,
-    "BC+SecAgg":   0.60,
-    "Full System": 0.88,
-}
 
-# Paper Table 7 anchor values
-_E1_PAPER = {
-    "No Defense":  {"reward": -5.71, "embb": 0.0699, "urllc": 0.403, "toi": None,  "d": 0.00},
-    "BC Only":     {"reward": -4.48, "embb": 0.0479, "urllc": 0.288, "toi": 12,    "d": +0.86},
-    "DP Only":     {"reward": -5.77, "embb": 0.0643, "urllc": 0.364, "toi": None,  "d": -0.05},
-    "SecAgg Only": {"reward": -5.46, "embb": 0.0654, "urllc": 0.380, "toi": None,  "d": +0.23},
-    "BC+DP":       {"reward": -4.69, "embb": 0.0449, "urllc": 0.263, "toi": 10,    "d": +0.71},
-    "BC+SecAgg":   {"reward": -4.29, "embb": 0.0444, "urllc": 0.270, "toi": 11,    "d": +1.07},
-    "Full System": {"reward": -4.61, "embb": 0.0435, "urllc": 0.145, "toi": 12,    "d": +0.96},
-}
-
-
-def run_e1(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
+def run_e1(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_ABL,
            fast: bool = False) -> dict:
     """E1 — Security ablation under Byzantine 33% attack."""
     print(f"\n{'='*72}")
@@ -675,45 +591,32 @@ def run_e1(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
         )
         history = sim.run()
 
-        # Blend simulation output with paper anchors for realism
-        paper = _E1_PAPER[name]
+
+      
+        
         sim_reward = np.mean([h["average_reward"] for h in history])
         sim_embb   = np.mean([h["embb_outage"]    for h in history])
         sim_urllc  = np.mean([h["urllc_residual"] for h in history])
 
-        # Scale to paper range using linear interpolation
-        alpha_blend = 0.6   # 60% paper anchors, 40% simulation dynamics
-        reward_final = alpha_blend * paper["reward"] + (1 - alpha_blend) * sim_reward
-        embb_final   = alpha_blend * paper["embb"]   + (1 - alpha_blend) * sim_embb
-        urllc_final  = alpha_blend * paper["urllc"]  + (1 - alpha_blend) * sim_urllc
+      reward_vals = [h["average_reward"] for h in history]
+embb_vals   = [h["embb_outage"] for h in history]
+urllc_vals  = [h["urllc_residual"] for h in history]
 
-        # 95 % CI from simulation variance
+reward_mean = float(np.mean(reward_vals))
+embb_mean   = float(np.mean(embb_vals))
+urllc_mean  = float(np.mean(urllc_vals))
+
+_, reward_std, reward_ci = ci95(reward_vals)
+
+     
         reward_vals  = [h["average_reward"] for h in history]
         _, r_std, r_ci = ci95(reward_vals)
-        r_std *= abs(paper["reward"])   # scale to paper magnitude
+      
 
-        prot_pct  = _E1_PAPER_PROTECTION[name]
-        toi       = paper["toi"]
-        d         = paper["d"]
+    
 
         gi_mse = BCAwfedavgSimulator.gradient_inversion_mse(cfg["secagg"], seed=SEED)
 
-        results[name] = {
-            "name":          name,
-            "blockchain":    cfg["blockchain"],
-            "dp":            cfg["dp"],
-            "secagg":        cfg["secagg"],
-            "reward_mean":   round(reward_final, 4),
-            "reward_std":    round(max(r_std, 0.90), 4),
-            "reward_ci95":   round(max(r_ci, 0.85),  4),
-            "embb_mean":     round(embb_final, 4),
-            "urllc_mean":    round(urllc_final, 4),
-            "protection_pct": round(prot_pct * 100, 1),
-            "toi_rounds":    toi,
-            "cohens_d":      round(d, 3),
-            "gi_mse":        round(gi_mse, 3),
-            "per_round":     history,
-        }
 
         print(f"     reward={reward_final:>8.4f}  eMBB={embb_final:.4f}  "
               f"URLLC={urllc_final:.4f}  prot={prot_pct*100:.0f}%  d={d:+.2f}")
@@ -774,7 +677,7 @@ def _plot_e1_bar(results: dict):
                         f"{int(p)}%", ha="center", va="bottom",
                         fontsize=7.5, fontweight="bold")
 
-    fig.suptitle("Security Ablation · Byzantine 33% · K=5, T=15, n=1 seed",
+    fig.suptitle("Security Ablation · Byzantine 33% · K=5, T=15, n={len(seeds)} seeds",
                  fontsize=11)
     plt.tight_layout()
     out = FIGURES_DIR / "fig_e1_ablation_bar.pdf"
@@ -811,7 +714,7 @@ def _plot_e1_convergence(results: dict, T: int):
         ax.set_xlim(1, T)
 
     axes[0].legend(fontsize=7.5, loc="lower right")
-    fig.suptitle("Round-by-round Convergence Under Byzantine 33% · K=5, T=15, n=1 seed",
+    fig.suptitle("Round-by-round Convergence Under Byzantine 33% · K=5, T=15, n={len(seeds)} seeds",
                  fontsize=10)
     plt.tight_layout()
     out = FIGURES_DIR / "fig_e1_convergence.pdf"
@@ -820,51 +723,7 @@ def _plot_e1_convergence(results: dict, T: int):
     print(f"  📊 Figure → {out}")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# E2 — QoS Protection Across Nine Attack Types (Table 8, Figure 4)
-# ═════════════════════════════════════════════════════════════════════════════
-
-E2_ATTACKS = [
-    {"name": "No Attack",      "type": "none",      "frac": 0.00, "str": 1.0},
-    {"name": "Byzantine 20%",  "type": "byzantine", "frac": 0.20, "str": 1.0},
-    {"name": "Byzantine 33%",  "type": "byzantine", "frac": 0.33, "str": 1.0},
-    {"name": "Poisoning a=5",  "type": "poisoning", "frac": 0.10, "str": 5.0},
-    {"name": "Poisoning a=10", "type": "poisoning", "frac": 0.10, "str": 10.0},
-    {"name": "Free-rider 20%", "type": "freerider", "frac": 0.20, "str": 1.0},
-    {"name": "Collusion 33%",  "type": "collusion", "frac": 0.33, "str": 3.0},
-    {"name": "Replay 20%",     "type": "replay",    "frac": 0.20, "str": 1.0},
-    {"name": "Sybil 20%",      "type": "sybil",     "frac": 0.20, "str": 1.0},
-]
-
-# Paper Table 8 anchor values
-_E2_PAPER_ND = {   # No Defense rewards
-    "No Attack":      -4.03, "Byzantine 20%":  -5.15, "Byzantine 33%":  -5.71,
-    "Poisoning a=5":  -4.79, "Poisoning a=10": -5.27, "Free-rider 20%": -4.39,
-    "Collusion 33%":  -5.43, "Replay 20%":     -4.27, "Sybil 20%":      -4.19,
-}
-_E2_PAPER_FS = {   # Full System rewards
-    "No Attack":      -4.51, "Byzantine 20%":  -4.54, "Byzantine 33%":  -4.61,
-    "Poisoning a=5":  -4.53, "Poisoning a=10": -4.54, "Free-rider 20%": -4.52,
-    "Collusion 33%":  -4.55, "Replay 20%":     -4.52, "Sybil 20%":      -4.51,
-}
-_E2_PAPER_DURLLC = {   # ΔURLLC % (positive = improvement)
-    "No Attack":      -0.1,  "Byzantine 20%":  97.5,  "Byzantine 33%":  64.0,
-    "Poisoning a=5":  97.3,  "Poisoning a=10": 97.6,  "Free-rider 20%": 96.9,
-    "Collusion 33%":  97.7,  "Replay 20%":     96.8,  "Sybil 20%":      96.7,
-}
-_E2_PAPER_TTI = {
-    "No Attack":      None,  "Byzantine 20%":  9,  "Byzantine 33%":  12,
-    "Poisoning a=5":  9,     "Poisoning a=10": 9,  "Free-rider 20%": 9,
-    "Collusion 33%":  9,     "Replay 20%":     9,  "Sybil 20%":      9,
-}
-_E2_PAPER_D = {
-    "No Attack":     -0.39, "Byzantine 20%":  +0.42, "Byzantine 33%":  +0.67,
-    "Poisoning a=5": +0.19, "Poisoning a=10": +0.49, "Free-rider 20%": -0.09,
-    "Collusion 33%": +0.56, "Replay 20%":     -0.19, "Sybil 20%":      -0.23,
-}
-
-
-def run_e2(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
+def run_e2(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_ABL,
            fast: bool = False) -> List[dict]:
     """E2 — QoS protection across nine attack types."""
     print(f"\n{'='*72}")
@@ -896,30 +755,12 @@ def run_e2(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
         )
         fs_hist = fs_sim.run()
 
-        # Blend with paper anchors
-        nd_r = _E2_PAPER_ND[name]
-        fs_r = _E2_PAPER_FS[name]
-        delta_urllc = _E2_PAPER_DURLLC[name]
-        toi         = _E2_PAPER_TTI[name]
-        d           = _E2_PAPER_D[name]
+  
 
         nd_urllc = np.mean([h["urllc_residual"] for h in nd_hist]) * 0.1
         fs_urllc = nd_urllc * (1 - delta_urllc / 100) if delta_urllc > 0 else nd_urllc
 
-        row = {
-            "attack":              name,
-            "nd_reward":           round(nd_r, 4),
-            "fs_reward":           round(fs_r, 4),
-            "delta_embb_pct":      round(
-                (_E2_PAPER_ND.get(name, nd_r) - fs_r) /
-                (abs(_E2_PAPER_ND.get(name, nd_r)) + 1e-9) * 100, 1
-            ),
-            "delta_urllc_pct":     round(delta_urllc, 1),
-            "toi_rounds":          toi,
-            "cohens_d":            round(d, 3),
-            "nd_urllc_mean":       round(float(nd_urllc), 5),
-            "fs_urllc_mean":       round(float(fs_urllc), 5),
-        }
+       
         rows.append(row)
         print(f"     ND={nd_r:.3f}  FS={fs_r:.3f}  ΔURLLC={delta_urllc:.1f}%  "
               f"TTI={toi}  d={d:+.2f}")
@@ -961,7 +802,7 @@ def _plot_e2(rows: List[dict]):
     ax2.set_title("(b) URLLC Residual Packets")
     ax2.legend(fontsize=8)
 
-    fig.suptitle("QoS Protection · No Defense vs Full BC-AWFedAvg · K=5, T=15, n=1 seed",
+    fig.suptitle("QoS Protection · No Defense vs Full BC-AWFedAvg · K=5, T=15, n={len(seeds)} seeds",
                  fontsize=10)
     plt.tight_layout()
     out = FIGURES_DIR / "fig_e2_qos_protection.pdf"
@@ -976,17 +817,9 @@ def _plot_e2(rows: List[dict]):
 
 _E3_EPSILONS  = [0.5, 1.0, 2.0, 5.0, float("inf")]
 
-# Paper Table 9 anchors
-_E3_PAPER = {
-    0.5:          {"sigma_g": 9.69, "eps_adv": 14.2,  "eps_rdp": 1.32,  "reward": -5.30},
-    1.0:          {"sigma_g": 4.84, "eps_adv": 44.4,  "eps_rdp": 4.15,  "reward": -4.51},
-    2.0:          {"sigma_g": 2.42, "eps_adv": 228.8, "eps_rdp": 21.4,  "reward": -4.21},
-    5.0:          {"sigma_g": 0.97, "eps_adv": None,  "eps_rdp": None,  "reward": -4.08},
-    float("inf"): {"sigma_g": 0.00, "eps_adv": 0.0,  "eps_rdp": 0.0,   "reward": -4.03},
-}
 
 
-def run_e3(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_PRIV,
+def run_e3(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_PRIV,
            fast: bool = False) -> List[dict]:
     """E3 — Privacy accounting and gradient inversion resilience."""
     print(f"\n{'='*72}")
@@ -1002,8 +835,7 @@ def run_e3(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_PRIV,
         eps_str = "∞" if math.isinf(eps) else str(eps)
         print(f"\n  ▶ ε = {eps_str}")
 
-        paper = _E3_PAPER[eps]
-        sigma_g = paper["sigma_g"]
+
 
         # Run the RDP accountant for T rounds
         rdp_acc = RDPAccountant()
@@ -1029,8 +861,7 @@ def run_e3(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_PRIV,
         gi_mse_secagg = BCAwfedavgSimulator.gradient_inversion_mse(True,  seed=SEED)
         gi_mse_nosec  = BCAwfedavgSimulator.gradient_inversion_mse(False, seed=SEED)
 
-        # Reward (blended with paper anchor)
-        reward = paper["reward"]
+        
 
         row = {
             "epsilon":         eps_str,
@@ -1049,81 +880,14 @@ def run_e3(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_PRIV,
               f"×{tightening:.1f}  " if tightening else f"  " +
               f"reward={reward}  GI-MSE(SA)={gi_mse_secagg:.3f}")
 
-    # ── Plot Figure 5 ─────────────────────────────────────────────────────────
-    _plot_e3(rows, T)
 
-    # Strip per-round data for CSV
-    csv_rows = [{k: v for k, v in r.items() if k != "rdp_per_round"} for r in rows]
-    save_csv(csv_rows, RESULTS_DIR / "e3_privacy.csv")
-    save_json(rows,    RESULTS_DIR / "e3_privacy.json")
-    return rows
-
-
-def _plot_e3(rows: List[dict], T: int):
-    """Figure 5: Privacy analysis — three panels."""
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
-
-    eps_labels = [r["epsilon"] for r in rows[:-1]]   # exclude ∞
-    x = np.arange(len(eps_labels))
-
-    # (a) RDP vs advanced composition
-    eps_adv = [float(r["eps_adv"]) if r["eps_adv"] != "—" else 0 for r in rows[:-1]]
-    eps_rdp = [float(r["eps_rdp"]) if r["eps_rdp"] != "—" else 0 for r in rows[:-1]]
-    w = 0.35
-    axes[0].bar(x - w/2, eps_adv, w, label="ε_adv (naive)", color="#aaaaaa")
-    axes[0].bar(x + w/2, eps_rdp, w, label="ε_RDP (tight)", color="#4e79a7")
-    for xi, (ea, er) in enumerate(zip(eps_adv, eps_rdp)):
-        if ea > 0 and er > 0:
-            axes[0].text(xi, max(ea, er) + 1, f"×{ea/er:.0f}", ha="center",
-                         fontsize=8, color="#e15759")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels([f"ε={l}" for l in eps_labels], fontsize=9)
-    axes[0].set_ylabel("ε_total after T=15 rounds")
-    axes[0].set_title("(a) RDP tightening (10.7×)")
-    axes[0].legend(fontsize=8)
-
-    # (b) Privacy-utility tradeoff
-    rewards = [abs(r["reward"]) for r in rows]
-    eps_x_all = [0.5, 1.0, 2.0, 5.0, 6.0]  # use 6 as proxy for ∞
-    axes[1].plot(eps_x_all, rewards, "o-", color="#e15759", linewidth=2)
-    axes[1].axhline(abs(_E3_PAPER[float("inf")]["reward"]), color="gray",
-                    linestyle="--", linewidth=1, label="No DP baseline")
-    axes[1].set_xlabel("ε (privacy budget)")
-    axes[1].set_ylabel("|Average Reward|")
-    axes[1].set_title("(b) Privacy-utility tradeoff")
-    axes[1].legend(fontsize=8)
-    axes[1].set_xticks(eps_x_all)
-    axes[1].set_xticklabels(["0.5","1.0","2.0","5.0","∞"])
-
-    # (c) SecAgg gradient inversion MSE
-    gi_sa  = [r["gi_mse_secagg"]   for r in rows]
-    gi_nos = [r["gi_mse_no_secagg"] for r in rows]
-    x_all  = np.arange(len(rows))
-    xlabels = [r["epsilon"] for r in rows]
-    axes[2].bar(x_all - w/2, gi_nos, w, color="#aaaaaa", label="No SecAgg")
-    axes[2].bar(x_all + w/2, gi_sa,  w, color="#4e79a7", label="With SecAgg")
-    axes[2].axhline(0.984, color="#59a14f", linestyle=":", linewidth=1.5,
-                    label="SecAgg MSE≈0.98 (fails)")
-    axes[2].set_xticks(x_all)
-    axes[2].set_xticklabels([f"ε={l}" for l in xlabels], fontsize=9)
-    axes[2].set_ylabel("GI-MSE (higher = better privacy)")
-    axes[2].set_title("(c) SecAgg gradient protection")
-    axes[2].set_ylim(0, 1.1)
-    axes[2].legend(fontsize=8)
-
-    fig.suptitle("Privacy Analysis · K=3, T=15, n=1 seed", fontsize=11)
-    plt.tight_layout()
-    out = FIGURES_DIR / "fig_e3_privacy.pdf"
-    plt.savefig(out)
-    plt.close()
-    print(f"  📊 Figure → {out}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# E4 — Blockchain Governance Characterisation (Table 10, Figure 6)
+# E4 — Blockchain Governance Characterisation 
 # ═════════════════════════════════════════════════════════════════════════════
 
-def run_e4(n_rounds: int = N_ROUNDS_PAPER, fast: bool = False) -> List[dict]:
+def run_e4(n_rounds: int = N_ROUNDS, fast: bool = False) -> List[dict]:
     """E4 — Blockchain governance overhead characterisation."""
     print(f"\n{'='*72}")
     print(f"  E4 — Blockchain Governance  |  K ∈ {{3,5,10}}  T={n_rounds}")
@@ -1227,195 +991,14 @@ def _plot_e4(rows: List[dict]):
     print(f"  📊 Figure → {out}")
 
 
-def _plot_e4_reputation(n_rounds: int = N_ROUNDS_PAPER):
-    """Figure 6b: Attacker weight decay under Byzantine 20%."""
-    T = n_rounds
-    rounds = np.arange(1, T + 1)
-
-    # Run 4 seeds to show cross-seed variance (matches paper Figure 6b)
-    seeds_to_show = [42, 101, 202, 303]
-    colors        = ["#e15759", "#e15759", "#e15759", "#e15759"]
-    linestyles    = ["-", "--", "-.", ":"]
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-
-    for seed, ls in zip(seeds_to_show, linestyles):
-        sim = BCAwfedavgSimulator(
-            n_clients=5, n_rounds=T, seed=seed,
-            blockchain=True, dp=True, secagg=True,
-            attack_type="byzantine", attack_fraction=0.20,
-        )
-        hist = sim.run()
-        # Pad if fast mode
-        atk_w = [h["attacker_weight"] for h in hist]
-        if len(atk_w) < T:
-            atk_w += [atk_w[-1]] * (T - len(atk_w))
-        ax.plot(rounds[:T], atk_w[:T], color="#e15759", linestyle=ls,
-                linewidth=1.2, alpha=0.8, label=f"seed {seed}")
-
-    ax.axhline(0.10, color="black", linestyle="--", linewidth=1.2,
-               label="Isolation (0.10)")
-    ax.axhline(0.20, color="gray",  linestyle=":",  linewidth=1.0,
-               label="Uniform (0.20)")
-    ax.set_xlabel("Communication Round")
-    ax.set_ylabel("Attacker Weight w_k^(t)")
-    ax.set_title("(b) Reputation: attacker weight decay (Byz. 20%)")
-    ax.legend(fontsize=7.5)
-    ax.set_xlim(1, T)
-    ax.set_ylim(0, 0.30)
-    plt.tight_layout()
-    out = FIGURES_DIR / "fig_e4b_reputation_weight_decay.pdf"
-    plt.savefig(out)
-    plt.close()
-    print(f"  📊 Figure → {out}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# E4b — Reputation Dynamics Across Attack Types (Table 11, Figure 7)
+# E5 — Comparison with Security-Focused Baselines
 # ═════════════════════════════════════════════════════════════════════════════
 
-_E4B_PAPER = {
-    "Byzantine 20%":  {"delta_rwd_pct": -7.1,  "toi": 9,  "embb": 0.0432, "urllc": 0.0087},
-    "Byzantine 33%":  {"delta_rwd_pct": -12.4, "toi": 12, "embb": 0.0453, "urllc": 0.0196},
-    "Poisoning a=5":  {"delta_rwd_pct": -4.8,  "toi": 7,  "embb": 0.0427, "urllc": 0.0087},
-    "Poisoning a=10": {"delta_rwd_pct": -8.6,  "toi": 10, "embb": 0.0441, "urllc": 0.0088},
-    "Free-rider 20%": {"delta_rwd_pct": -2.1,  "toi": 3,  "embb": 0.0423, "urllc": 0.0086},
-    "Collusion 33%":  {"delta_rwd_pct": -9.3,  "toi": 11, "embb": 0.0449, "urllc": 0.0134},
-    "Replay 20%":     {"delta_rwd_pct": -1.4,  "toi": 2,  "embb": 0.0422, "urllc": 0.0086},
-    "Sybil 20%":      {"delta_rwd_pct": -0.8,  "toi": 2,  "embb": 0.0422, "urllc": 0.0086},
-}
 
-
-def run_e4b(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
-            fast: bool = False) -> List[dict]:
-    """E4b — Reputation dynamics across attack types."""
-    print(f"\n{'='*72}")
-    print(f"  E4b — Reputation Dynamics  |  K={n_clients}  T={n_rounds}")
-    print(f"{'='*72}")
-
-    T = 3 if fast else n_rounds
-    rows = []
-
-    for name, paper in _E4B_PAPER.items():
-        atk_map = {
-            "Byzantine 20%":  ("byzantine", 0.20, 1.0),
-            "Byzantine 33%":  ("byzantine", 0.33, 1.0),
-            "Poisoning a=5":  ("poisoning", 0.10, 5.0),
-            "Poisoning a=10": ("poisoning", 0.10, 10.0),
-            "Free-rider 20%": ("freerider", 0.20, 1.0),
-            "Collusion 33%":  ("collusion", 0.33, 3.0),
-            "Replay 20%":     ("replay",    0.20, 1.0),
-            "Sybil 20%":      ("sybil",     0.20, 1.0),
-        }
-        atk_type, atk_frac, atk_str = atk_map[name]
-
-        sim = BCAwfedavgSimulator(
-            n_clients=n_clients, n_rounds=T, seed=SEED,
-            blockchain=True, dp=True, secagg=True,
-            attack_type=atk_type, attack_fraction=atk_frac, attack_strength=atk_str,
-        )
-        sim.run()
-
-        row = {
-            "attack":          name,
-            "delta_rwd_pct":   paper["delta_rwd_pct"],
-            "toi_rounds":      paper["toi"],
-            "embb_steady":     paper["embb"],
-            "urllc_steady":    paper["urllc"],
-        }
-        rows.append(row)
-        print(f"  ▶ {name:20s}  Δrwd={paper['delta_rwd_pct']:>6.1f}%  "
-              f"TTI={paper['toi']}  URLLC={paper['urllc']:.4f}")
-
-    # ── Plot Figure 7 (TTI bar chart) ─────────────────────────────────────────
-    _plot_e4b(rows)
-
-    save_csv(rows,  RESULTS_DIR / "e4b_reputation.csv")
-    save_json(rows, RESULTS_DIR / "e4b_reputation.json")
-    return rows
-
-
-def _plot_e4b(rows: List[dict]):
-    """Figure 7: Time-to-Isolate bar chart."""
-    names = [r["attack"] for r in rows]
-    ttis  = [r["toi_rounds"] for r in rows]
-
-    tier_colors = {
-        "Byzantine 20%":  "#f28e2b",  # Tier 3
-        "Byzantine 33%":  "#f28e2b",
-        "Poisoning a=5":  "#4e79a7",  # Tier 2
-        "Poisoning a=10": "#4e79a7",
-        "Free-rider 20%": "#76b7b2",  # Tier 2
-        "Collusion 33%":  "#b07aa1",  # Tier 3
-        "Replay 20%":     "#59a14f",  # Tier 1
-        "Sybil 20%":      "#59a14f",
-    }
-
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    x      = np.arange(len(names))
-    colors = [tier_colors[n] for n in names]
-    bars   = ax.bar(x, ttis, color=colors, width=0.6, edgecolor="white")
-
-    for bar, toi, name in zip(bars, ttis, names):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.2,
-                f"{toi}±1r", ha="center", va="bottom", fontsize=8)
-
-    # Tier annotation
-    ax.axhline(12, color="#333", linestyle="--", linewidth=0.8, label="T=15 max")
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        ["Byz\n20%","Byz\n33%","Pois\na=5","Pois\na=10",
-         "Free-\nrider","Collu-\nsion","Replay","Sybil"],
-        fontsize=8,
-    )
-    ax.set_ylabel("Time-to-Isolate (rounds)")
-    ax.set_title("BC Reputation: Time-to-Isolate · K=5, T=15, n=1 seed")
-    ax.set_ylim(0, 17)
-
-    # Legend patches for tiers
-    patches = [
-        mpatches.Patch(color="#59a14f", label="Tier 1 — Cryptographic (2r)"),
-        mpatches.Patch(color="#4e79a7", label="Tier 2 — QoS divergence (3–10r)"),
-        mpatches.Patch(color="#f28e2b", label="Tier 3 — Near-majority (9–12r)"),
-        mpatches.Patch(color="#b07aa1", label="Collusion (Tier 3, 11r)"),
-    ]
-    ax.legend(handles=patches, fontsize=8, loc="upper left")
-    plt.tight_layout()
-    out = FIGURES_DIR / "fig_e4b_reputation_tti.pdf"
-    plt.savefig(out)
-    plt.close()
-    print(f"  📊 Figure → {out}")
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# E5 — Comparison with Security-Focused Baselines (Table 12, Figure 8)
-# ═════════════════════════════════════════════════════════════════════════════
-
-# Paper Table 12 (Byzantine 33%, K=5, T=15, n=10 seeds)
-_E5_PAPER_BASELINES = [
-    {"method": "No Defense",     "reward": -5.04, "embb": 0.0585, "urllc": 0.391,
-     "gi_mse": 0.133, "bc": False, "dp": False, "secagg": False, "eps_tot": None,  "d": 0.00},
-    {"method": "Krum",           "reward": -4.16, "embb": 0.0447, "urllc": 0.292,
-     "gi_mse": 0.133, "bc": False, "dp": False, "secagg": False, "eps_tot": None,  "d": +1.10},
-    {"method": "FLTrust",        "reward": -3.63, "embb": 0.0410, "urllc": 0.267,
-     "gi_mse": 0.133, "bc": False, "dp": False, "secagg": False, "eps_tot": None,  "d": +1.60},
-    {"method": "FLAME",          "reward": -3.43, "embb": 0.0392, "urllc": 0.252,
-     "gi_mse": 0.133, "bc": False, "dp": False, "secagg": False, "eps_tot": None,  "d": +1.67},
-    {"method": "DP-FedAvg",      "reward": -4.32, "embb": 0.0489, "urllc": 0.333,
-     "gi_mse": 0.133, "bc": False, "dp": True,  "secagg": False, "eps_tot": 4.15,  "d": +0.94},
-    {"method": "BlockFL",        "reward": -4.30, "embb": 0.0461, "urllc": 0.333,
-     "gi_mse": 0.133, "bc": True,  "dp": False, "secagg": False, "eps_tot": None,  "d": +0.99},
-    {"method": "Jia et al.",     "reward": -3.68, "embb": 0.0413, "urllc": 0.280,
-     "gi_mse": 0.133, "bc": True,  "dp": True,  "secagg": False, "eps_tot": 21.4,  "d": +1.55},
-    {"method": "Wan et al.",     "reward": -3.84, "embb": 0.0437, "urllc": 0.284,
-     "gi_mse": 0.133, "bc": False, "dp": True,  "secagg": False, "eps_tot": 4.15,  "d": +1.36},
-    {"method": "BC-AWFedAvg",    "reward": -2.94, "embb": 0.0304, "urllc": 0.195,
-     "gi_mse": 0.984, "bc": True,  "dp": True,  "secagg": True,  "eps_tot": 4.15,  "d": +2.15},
-]
-
-
-def run_e5(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
+def run_e5(n_rounds: int = N_ROUNDS, n_clients: int = N_CLIENTS_ABL,
            fast: bool = False) -> List[dict]:
     """E5 — Comparison with security-focused baselines under Byzantine 33%."""
     print(f"\n{'='*72}")
@@ -1438,7 +1021,7 @@ def run_e5(n_rounds: int = N_ROUNDS_PAPER, n_clients: int = N_CLIENTS_ABL,
     rows = []
     for bl in _E5_PAPER_BASELINES:
         name = bl["method"]
-        # Use paper anchor for all baselines; our simulation validates BC-AWFedAvg
+ 
         if name == "BC-AWFedAvg":
             gi_mse = BCAwfedavgSimulator.gradient_inversion_mse(True, seed=SEED)
         else:
@@ -1522,7 +1105,7 @@ def _plot_e5(rows: List[dict]):
     ax3.text(x[ours_idx], urllc[ours_idx] + 0.003, "*", ha="center",
              fontsize=14, color="#e15759")
 
-    fig.suptitle("Security Baselines · Byzantine 33% · K=5, T=15, n=1 seed",
+    fig.suptitle("Security Baselines · Byzantine 33% · K=5, T=15, n={len(seeds)} seeds",
                  fontsize=11)
     plt.tight_layout()
     out = FIGURES_DIR / "fig_e5_baselines.pdf"
@@ -1535,65 +1118,6 @@ def _plot_e5(rows: List[dict]):
 # Summary table printer
 # ═════════════════════════════════════════════════════════════════════════════
 
-def print_summary(all_results: dict):
-    sep = "=" * 78
-
-    print(f"\n{sep}")
-    print("  EXPERIMENT SUMMARY  (all paper metrics reproduced)")
-    print(sep)
-
-    if "e1" in all_results:
-        print("\n  TABLE 7 — Security Ablation (E1)  Byzantine 33%  K=5 T=15")
-        print(f"  {'Config':<20} {'Reward':>8} {'eMBB':>8} {'URLLC':>8} "
-              f"{'Prot%':>6} {'TTI':>4} {'d':>6}")
-        print("  " + "-"*64)
-        for name, r in all_results["e1"].items():
-            toi = str(r["toi_rounds"]) + "±1" if r["toi_rounds"] else "  —"
-            print(f"  {name:<20} {r['reward_mean']:>8.4f} {r['embb_mean']:>8.4f} "
-                  f"{r['urllc_mean']:>8.4f} {r['protection_pct']:>5.0f}% "
-                  f"{toi:>5} {r['cohens_d']:>+.2f}")
-
-    if "e2" in all_results:
-        print("\n  TABLE 8 — QoS Protection (E2)  K=5 T=15")
-        print(f"  {'Attack':<22} {'ND Rew':>8} {'FS Rew':>8} {'ΔURLLC%':>9} "
-              f"{'TTI':>4} {'d':>6}")
-        print("  " + "-"*60)
-        for r in all_results["e2"]:
-            toi = str(r["toi_rounds"]) + "±1" if r["toi_rounds"] else "  —"
-            print(f"  {r['attack']:<22} {r['nd_reward']:>8.3f} {r['fs_reward']:>8.3f} "
-                  f"{r['delta_urllc_pct']:>8.1f}% {toi:>5} {r['cohens_d']:>+.2f}")
-
-    if "e3" in all_results:
-        print("\n  TABLE 9 — Privacy Accounting (E3)  K=3 T=15")
-        print(f"  {'ε':>5} {'σ_G':>6} {'ε_adv':>7} {'ε_RDP':>7} {'×tight':>7} "
-              f"{'Reward':>8} {'GI-MSE(SA)':>11}")
-        print("  " + "-"*58)
-        for r in all_results["e3"]:
-            print(f"  {r['epsilon']:>5} {r['sigma_g']:>6} {str(r['eps_adv']):>7} "
-                  f"{str(r['eps_rdp']):>7} {str(r['tightening_x']):>7} "
-                  f"{r['reward']:>8.2f} {r['gi_mse_secagg']:>11.3f}")
-
-    if "e4" in all_results:
-        print("\n  TABLE 10 — Blockchain Overhead (E4)")
-        print(f"  {'K':>3} {'Total(s)':>10} {'open_tx':>8} {'Encrypt':>8} "
-              f"{'IPFS':>8} {'submit':>8} {'KB':>8} {'Tamper':>7}")
-        print("  " + "-"*62)
-        for r in all_results["e4"]:
-            print(f"  {r['K']:>3} {r['total_s_mean']:>6.3f}±{r['total_s_std']:.3f}"
-                  f" {r['open_tx_s']:>8.3f} {r['encrypt_s']:>8.3f} "
-                  f"{r['ipfs_s']:>8.3f} {r['submit_s']:>8.3f} "
-                  f"{r['ipfs_kb_mean']:>8.1f} {r['tamper_det']:>7.0%}")
-
-    if "e5" in all_results:
-        print("\n  TABLE 12 — Baseline Comparison (E5)  Byzantine 33%  K=5 T=15")
-        print(f"  {'Method':<18} {'Reward':>8} {'eMBB':>8} {'URLLC':>8} "
-              f"{'GI-MSE':>8} {'ε_tot':>7} {'d':>6}")
-        print("  " + "-"*68)
-        for r in all_results["e5"]:
-            eps = f"{r['eps_total']:.2f}" if r["eps_total"] else "  —"
-            print(f"  {r['method']:<18} {r['reward_mean']:>8.3f} {r['embb_mean']:>8.4f} "
-                  f"{r['urllc_mean']:>8.3f} {r['gi_mse']:>8.3f} {eps:>7} "
-                  f"{r['cohens_d']:>+.2f}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1610,17 +1134,17 @@ def try_flower_run(exp: str, fast: bool) -> Optional[dict]:
     try:
         seeds = [SEED]
         if exp == "e1":
-            # Map paper's 7-config ablation to existing run_ablation (5 configs)
-            results = run_ablation(K=N_CLIENTS_ABL, T=3 if fast else N_ROUNDS_PAPER,
+      
+            results = run_ablation(K=N_CLIENTS_ABL, T=3 if fast else N_ROUNDS,
                                    seeds=seeds, smoke=fast)
             return {"flower_ablation": [asdict(r) for r in results]}
         elif exp == "e2":
-            results = run_attacks(K=N_CLIENTS_ABL, T=3 if fast else N_ROUNDS_PAPER,
+            results = run_attacks(K=N_CLIENTS_ABL, T=3 if fast else N_ROUNDS,
                                   seeds=seeds, smoke=fast)
             return {"flower_attacks": [asdict(r) for r in results]}
         elif exp == "e3":
             results = run_privacy_tradeoff(K=N_CLIENTS_PRIV,
-                                           T=3 if fast else N_ROUNDS_PAPER,
+                                           T=3 if fast else N_ROUNDS,
                                            seeds=seeds, smoke=fast)
             return {"flower_privacy": [asdict(r) for r in results]}
     except Exception as exc:
@@ -1634,22 +1158,13 @@ def try_flower_run(exp: str, fast: bool) -> Optional[dict]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BC-AWFedAvg — paper experiment orchestrator",
+        description="BC-AWFedAvg ",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--exp", nargs="+", default=["all"],
         choices=["all", "e1", "e2", "e3", "e4", "e4b", "e5"],
-        help=(
-            "Which experiments to run.\n"
-            "  all  — run all five paper experiments (default)\n"
-            "  e1   — Security Ablation (Table 7, Figures 2-3)\n"
-            "  e2   — QoS Across Nine Attacks (Table 8, Figure 4)\n"
-            "  e3   — Privacy Accounting (Table 9, Figure 5)\n"
-            "  e4   — Blockchain Overhead (Table 10, Figure 6)\n"
-            "  e4b  — Reputation Dynamics (Table 11, Figure 7)\n"
-            "  e5   — Baseline Comparison (Table 12, Figure 8)\n"
-        ),
+       
     )
     parser.add_argument(
         "--fast", action="store_true",
@@ -1660,8 +1175,8 @@ def main():
         help=f"Global random seed (default: {SEED}).",
     )
     parser.add_argument(
-        "--rounds", type=int, default=N_ROUNDS_PAPER,
-        help=f"Override number of FL rounds (default: {N_ROUNDS_PAPER}).",
+        "--rounds", type=int, default=N_ROUNDS,
+        help=f"Override number of FL rounds (default: {N_ROUNDS}).",
     )
     parser.add_argument(
         "--use-flower", action="store_true",
@@ -1674,7 +1189,7 @@ def main():
     T = args.rounds
 
     print("\n" + "=" * 72)
-    print("  BC-AWFedAvg  —  Paper Experiment Orchestrator")
+    print("  BC-AWFedAvg ")
     print(f"  Seed: {args.seed}  |  Rounds: {T}  |  Fast: {args.fast}")
     print(f"  Experiments: {args.exp}")
     print(f"  Flower stack available: {_HAS_FLOWER}")
