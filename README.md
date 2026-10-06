@@ -136,8 +136,8 @@ client_fn = make_blockchain_client_fn(strategy.ppfl)
 
 | Criterion | Default α | Meaning |
 |---|---|---|
-| eMBB outage | 0.30 | Clients with fewer eMBB outages get higher weight |
-| URLLC residual | 0.30 | Clients with lower undelivered URLLC packets get higher weight |
+| eMBB outage | 0.22 | Clients with fewer eMBB outages get higher weight |
+| URLLC residual | 0.38 | Clients with lower undelivered URLLC packets get higher weight |
 | Activation diversity | 0.20 | Clients with more diverse traffic loads contribute more |
 | Performance stability | 0.20 | Clients with stable reward history get higher weight |
 
