@@ -1,189 +1,306 @@
 """
-Efficient Differential Privacy Module
-======================================
+Privacy utilities for BC-AWFedAvg
+================================
 
-Three enhancements over the baseline Gaussian mechanism + advanced composition:
+Corrected implementation of:
+    1. Gaussian DP with RDP accounting
+    2. Adaptive clipping utilities
+    3. Top-K update sparsification with error feedback
 
-1. **Rényi Differential Privacy (RDP) Accountant**  (Mironov, 2017)
-   Tracks per-round Rényi divergence at multiple orders α, then converts
-   to (ε, δ)-DP via the optimal conversion lemma.  Yields *significantly*
-   tighter cumulative ε than the advanced composition theorem for many
-   rounds.
+Important protocol distinction
+------------------------------
+BC-AWFedAvg clips and protects a CLIENT UPDATE, not the complete model:
 
-2. **Adaptive Clipping** (Andrew et al., 2021)
-   Adjusts the L2 clip norm C each round so that a target quantile of
-   client updates lie within the bound.  Avoids over-clipping (too much
-   bias) or under-clipping (too much noise relative to signal).
+    delta_k = theta_k - theta_global
+    delta_hat_k = Clip(delta_k, C) + N(0, sigma^2 I)
 
-3. **Top-K Gradient Sparsification** with error feedback (Aji & Heafield, 2017)
-   Only transmits the K largest-magnitude coordinates each round.  The
-   residual (un-transmitted coordinates) is accumulated into an error
-   buffer and added to the next round's update.  Achieves 10–100× fewer
-   transmitted floats with negligible convergence loss when K/D ≥ 0.01.
+The global model itself must not be clipped to C. Clipping the complete
+parameter vector would generally destroy the learned model scale.
 
-Integration
------------
-All three are drop-in replacements / additions to the existing pipeline:
+For the two-phase weighted secure-aggregation protocol, the recommended
+order is:
 
-    PrivacyPreservingFederatedLearning.add_differential_privacy_noise()
-       ↳ replaced by  EfficientDPManager.add_dp_noise()  which uses
-         adaptive clipping + calibrated Gaussian noise
+    local update
+      -> client-update clipping
+      -> Gaussian DP noise
+      -> aggregation weight w_k
+      -> pairwise masking
+      -> server sum
 
-    cumulative_privacy_cost()
-       ↳ replaced by  RDPAccountant.get_epsilon()  for tighter bounds
+Adaptive clipping note
+----------------------
+A global target-quantile update of C requires cross-client update-norm
+information. That information cannot simply be collected in plaintext in a
+privacy-preserving protocol. Therefore the BC-AWFedAvg integration keeps the
+thesis' fixed C=1 configuration by default. AdaptiveClipper is provided as a
+separate utility for experiments where a protected norm-estimation mechanism
+is available.
 
-    client fit() parameter upload
-       ↳ wrapped with  TopKSparsifier.sparsify() / densify()
+Top-K note
+----------
+Top-K is applied to updates/contributions, not absolute model parameters.
+Error feedback is persistent per client. The sparse tensor remains dense in
+memory with zeros on non-selected coordinates so it can still be summed after
+secure masking.
 """
 
 from __future__ import annotations
 
-import math
+import hashlib
 import logging
+import math
 from collections import OrderedDict
-from typing import List, Tuple, Dict, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
-try:
-    import torch
-except ImportError:
-    import torch_shim as torch
+import torch
 
 logger = logging.getLogger(__name__)
 
+TensorDict = OrderedDict[str, torch.Tensor]
 
-# ═════════════════════════════════════════════════════════════════════════════
+
+# ============================================================================
 # 1. Rényi Differential Privacy Accountant
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+
 
 class RDPAccountant:
-    """
-    Rényi Differential Privacy accountant for the Gaussian mechanism.
+    """RDP accountant for Gaussian mechanisms.
 
-    For a single application of the Gaussian mechanism with sensitivity Δ
-    and noise σ, the RDP at order α is:
+    For Gaussian noise with standard deviation ``sigma`` and L2 sensitivity
+    ``Delta``, the Gaussian mechanism has RDP at order alpha > 1:
 
-        ε_RDP(α) = α Δ² / (2 σ²)
+        eps_RDP(alpha) = alpha * Delta^2 / (2 * sigma^2)
 
-    Composition across T rounds is additive:
+    RDP composes additively across rounds. The standard conversion used here
+    is the valid bound
 
-        ε_RDP_total(α) = T · ε_RDP(α)
+        eps_(epsilon,delta) <= eps_RDP(alpha)
+                                + log(1/delta)/(alpha - 1)
 
-    Conversion to (ε, δ)-DP uses the optimal bound (Balle et al., 2020):
-
-        ε = ε_RDP(α) + ln(1/δ) / (α − 1) − ln(α) / (α − 1) + ln((α−1)/α)
-
-    We evaluate at many α values and take the tightest ε.
+    evaluated over the configured orders.
     """
 
-    # Default α orders to evaluate (dense near 1, sparse at large values)
     DEFAULT_ORDERS = [
         1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0,
         10.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
     ]
 
-    def __init__(self, orders: Optional[List[float]] = None):
-        self.orders = orders or self.DEFAULT_ORDERS
-        # Accumulated RDP ε at each order (additive across rounds)
-        self._rdp_eps = np.zeros(len(self.orders))
+    def __init__(self, orders: Optional[Sequence[float]] = None):
+        raw_orders = list(orders) if orders is not None else list(self.DEFAULT_ORDERS)
+        self.orders = [float(a) for a in raw_orders if float(a) > 1.0]
+        if not self.orders:
+            raise ValueError("At least one RDP order alpha > 1 is required.")
+        self._rdp_eps = np.zeros(len(self.orders), dtype=np.float64)
         self._rounds = 0
+        self._round_records: List[Dict[str, float]] = []
 
-    def step(self, noise_sigma: float, sensitivity: float = 1.0):
-        """
-        Record one mechanism application (one FL round) with given σ and Δ.
-        """
-        if noise_sigma < 1e-12:
-            logger.warning("RDP step with near-zero sigma — privacy budget unbounded")
-            self._rdp_eps += np.inf
+    @property
+    def rounds(self) -> int:
+        return self._rounds
+
+    def step(self, noise_sigma: float, sensitivity: float = 1.0) -> None:
+        """Record one Gaussian mechanism application."""
+        sigma = float(noise_sigma)
+        delta_sens = float(sensitivity)
+        if sigma <= 0.0:
+            logger.warning("RDP step with non-positive sigma: privacy is unbounded")
+            self._rdp_eps[:] = np.inf
         else:
-            for i, alpha in enumerate(self.orders):
-                self._rdp_eps[i] += alpha * (sensitivity ** 2) / (2 * noise_sigma ** 2)
+            increment = np.array(
+                [alpha * (delta_sens ** 2) / (2.0 * sigma ** 2)
+                 for alpha in self.orders],
+                dtype=np.float64,
+            )
+            self._rdp_eps += increment
         self._rounds += 1
+        self._round_records.append({
+            "sigma": sigma,
+            "sensitivity": delta_sens,
+        })
 
-    def get_epsilon(self, delta: float) -> float:
-        """
-        Convert accumulated RDP to (ε, δ)-DP using the optimal conversion.
-
-        Returns the *tightest* ε across all α orders.
-        """
-        best_eps = float("inf")
-        for i, alpha in enumerate(self.orders):
-            if alpha <= 1.0:
-                continue
-            eps_candidate = (
-                self._rdp_eps[i]
-                + math.log(1.0 / delta) / (alpha - 1.0)
-                - math.log(alpha) / (alpha - 1.0)
-                + math.log((alpha - 1.0) / alpha)
-            )
-            best_eps = min(best_eps, eps_candidate)
-        return max(0.0, best_eps)
-
-    def get_epsilon_advanced_composition(
-        self, epsilon_per_round: float, delta: float, T: int
-    ) -> float:
-        """
-        For comparison: return the old advanced-composition ε.
-        ε_AC = √(2T·ln(1/δ)) · ε
-        """
-        return math.sqrt(2 * T * math.log(1.0 / delta)) * epsilon_per_round
-
-    def privacy_report(self, delta: float) -> Dict:
-        """Full report comparing RDP vs advanced composition."""
-        eps_rdp = self.get_epsilon(delta)
-        # For AC comparison we need per-round ε; approximate from first-order RDP
-        if self._rounds > 0 and len(self.orders) > 0:
-            # σ from first round α=2:  ε_RDP(2) = Δ²/(σ²) → σ = Δ/√ε_RDP
-            idx_alpha2 = min(range(len(self.orders)),
-                            key=lambda i: abs(self.orders[i] - 2.0))
-            per_round_rdp_alpha2 = self._rdp_eps[idx_alpha2] / max(self._rounds, 1)
-            # Convert single-round (α=2) to approximate per-round (ε,δ)
-            per_round_eps = per_round_rdp_alpha2 + math.log(1/delta)
-            eps_ac = self.get_epsilon_advanced_composition(
-                per_round_eps, delta, self._rounds
-            )
-        else:
-            per_round_eps = 0.0
-            eps_ac = 0.0
-
+    def epsilon_by_order(self, delta: float) -> Dict[float, float]:
+        """Return converted epsilon for every configured RDP order."""
+        if not (0.0 < delta < 1.0):
+            raise ValueError("delta must satisfy 0 < delta < 1.")
         return {
-            "method": "RDP (Rényi)",
-            "rounds": self._rounds,
-            "delta": delta,
-            "eps_rdp": float(eps_rdp),
-            "eps_advanced_composition": float(eps_ac),
-            "improvement_pct": (
-                (1 - eps_rdp / eps_ac) * 100 if eps_ac > 0 else 0.0
-            ),
-            "best_alpha": float(
-                self.orders[int(np.argmin([
-                    self._rdp_eps[i] + math.log(1/delta)/(a-1)
-                    for i, a in enumerate(self.orders) if a > 1
-                ]))]
-            ) if self._rounds > 0 else 0.0,
+            alpha: float(
+                self._rdp_eps[i] + math.log(1.0 / delta) / (alpha - 1.0)
+            )
+            for i, alpha in enumerate(self.orders)
         }
 
-    def reset(self):
-        """Reset the accountant."""
-        self._rdp_eps = np.zeros(len(self.orders))
+    def get_epsilon(self, delta: float) -> float:
+        """Return the tightest converted cumulative epsilon."""
+        values = self.epsilon_by_order(delta)
+        if not values:
+            return 0.0
+        best = min(values.values())
+        return max(0.0, float(best))
+
+    def best_alpha(self, delta: float) -> float:
+        """Return the RDP order producing the tightest conversion."""
+        values = self.epsilon_by_order(delta)
+        return float(min(values, key=values.get))
+
+    @staticmethod
+    def advanced_composition_epsilon(
+        epsilon_per_round: float,
+        delta_prime: float,
+        rounds: int,
+    ) -> float:
+        """Standard advanced-composition upper bound for comparison.
+
+        This is a comparison utility only. It assumes every round is
+        (epsilon_per_round, delta_i)-DP and uses an additional delta_prime.
+        The per-round deltas are not included in the returned epsilon.
+        """
+        eps = float(epsilon_per_round)
+        dp = float(delta_prime)
+        t = int(rounds)
+        if eps < 0.0 or dp <= 0.0 or dp >= 1.0 or t < 0:
+            raise ValueError("Invalid advanced-composition arguments.")
+        if t == 0 or eps == 0.0:
+            return 0.0
+        return float(
+            math.sqrt(2.0 * t * math.log(1.0 / dp)) * eps
+            + t * eps * (math.exp(eps) - 1.0)
+        )
+
+    def privacy_report(
+        self,
+        delta: float,
+        nominal_epsilon_per_round: Optional[float] = None,
+        advanced_comp_delta_prime: Optional[float] = None,
+    ) -> Dict:
+        """Return an auditable RDP report.
+
+        ``nominal_epsilon_per_round`` is optional. If supplied, a standard
+        advanced-composition comparison is included. No per-round epsilon is
+        inferred from an RDP order, avoiding the misleading reverse-calibration
+        used by the old implementation.
+        """
+        eps_rdp = self.get_epsilon(delta)
+        best_alpha = self.best_alpha(delta) if self._rounds else 0.0
+
+        report = {
+            "method": "RDP (Renyi)",
+            "rounds": int(self._rounds),
+            "delta": float(delta),
+            "eps_rdp": float(eps_rdp),
+            "best_alpha": float(best_alpha),
+            "rdp_orders": list(self.orders),
+            "per_order_epsilon": self.epsilon_by_order(delta) if self._rounds else {},
+        }
+
+        if nominal_epsilon_per_round is not None and self._rounds:
+            dp_prime = (
+                float(advanced_comp_delta_prime)
+                if advanced_comp_delta_prime is not None
+                else float(delta)
+            )
+            eps_ac = self.advanced_composition_epsilon(
+                epsilon_per_round=float(nominal_epsilon_per_round),
+                delta_prime=dp_prime,
+                rounds=self._rounds,
+            )
+            report["eps_advanced_composition"] = float(eps_ac)
+            report["advanced_composition_delta_prime"] = dp_prime
+            report["improvement_pct"] = (
+                (1.0 - eps_rdp / eps_ac) * 100.0 if eps_ac > 0.0 else 0.0
+            )
+        else:
+            report["eps_advanced_composition"] = None
+            report["advanced_composition_delta_prime"] = None
+            report["improvement_pct"] = None
+
+        return report
+
+    def reset(self) -> None:
+        self._rdp_eps.fill(0.0)
         self._rounds = 0
+        self._round_records.clear()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 2. Adaptive Clipping
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# 2. Tensor/update helpers
+# ============================================================================
+
+
+def _tensor_items(params: Mapping[str, torch.Tensor]):
+    for name, value in params.items():
+        if torch.is_tensor(value):
+            yield name, value
+
+
+def global_l2_norm(params: Mapping[str, torch.Tensor]) -> float:
+    """Compute the L2 norm of all tensor coordinates in a parameter mapping."""
+    sq = 0.0
+    found = False
+    for _, tensor in _tensor_items(params):
+        found = True
+        x = tensor.detach().float().cpu().numpy().astype(np.float64, copy=False)
+        sq += float(np.sum(x * x))
+    return math.sqrt(max(sq, 0.0)) if found else 0.0
+
+
+def subtract_state(
+    local_params: Mapping[str, torch.Tensor],
+    global_params: Mapping[str, torch.Tensor],
+) -> TensorDict:
+    """Return the client update ``local - global``."""
+    if list(local_params.keys()) != list(global_params.keys()):
+        raise ValueError("local_params and global_params must have identical keys/order.")
+
+    update = OrderedDict()
+    for name in local_params:
+        local = local_params[name]
+        base = global_params[name]
+        if torch.is_tensor(local) and torch.is_tensor(base):
+            update[name] = local.detach().float() - base.detach().float()
+        else:
+            update[name] = local
+    return update
+
+
+def clip_update(
+    update: Mapping[str, torch.Tensor],
+    clip_norm: float,
+) -> Tuple[TensorDict, float, float]:
+    """Clip a complete client update vector to L2 norm ``clip_norm``.
+
+    Returns ``(clipped_update, original_norm, scale)``.
+    """
+    C = float(clip_norm)
+    if C <= 0.0:
+        raise ValueError("clip_norm must be positive.")
+
+    norm = global_l2_norm(update)
+    scale = min(1.0, C / max(norm, 1e-12))
+    clipped = OrderedDict()
+    for name, value in update.items():
+        if torch.is_tensor(value):
+            clipped[name] = value.detach().float() * scale
+        else:
+            clipped[name] = value
+    return clipped, norm, scale
+
+
+# ============================================================================
+# 3. Adaptive clipping utility
+# ============================================================================
+
 
 class AdaptiveClipper:
-    """
-    Adjusts the L2 clip norm each round so that a target fraction of client
-    updates fall within the bound.
+    """Adaptive clip-norm controller.
 
-    Algorithm (Andrew et al., "Differentially Private Learning with Adaptive
-    Clipping", NeurIPS 2021):
-        C_{t+1} = C_t · exp(−η · (fraction_clipped_t − target_quantile))
+    ``updates`` must already be CLIENT UPDATES (local minus global), not full
+    model states.
 
-    A lower target_quantile (e.g. 0.5) clips more aggressively → more bias
-    but less noise.  Higher (e.g. 0.8) clips less → lower bias, more noise.
+    The controller updates C from the fraction of client updates whose norm is
+    above C. In a private federated deployment, the norm statistics should be
+    collected through a protected mechanism before this controller is used.
     """
 
     def __init__(
@@ -194,176 +311,170 @@ class AdaptiveClipper:
         min_clip: float = 0.1,
         max_clip: float = 50.0,
     ):
-        self.clip_norm = initial_clip_norm
-        self.target_quantile = target_quantile
-        self.lr = learning_rate
-        self.min_clip = min_clip
-        self.max_clip = max_clip
+        if initial_clip_norm <= 0:
+            raise ValueError("initial_clip_norm must be positive.")
+        if not (0.0 < target_quantile < 1.0):
+            raise ValueError("target_quantile must be in (0,1).")
+        if learning_rate <= 0:
+            raise ValueError("learning_rate must be positive.")
+        if min_clip <= 0 or max_clip < min_clip:
+            raise ValueError("Invalid clip range.")
+
+        self.clip_norm = float(initial_clip_norm)
+        self.target_quantile = float(target_quantile)
+        self.lr = float(learning_rate)
+        self.min_clip = float(min_clip)
+        self.max_clip = float(max_clip)
         self.history: List[Dict] = []
 
     def clip_and_update(
-        self, param_dicts: List[OrderedDict]
-    ) -> Tuple[List[OrderedDict], float]:
-        """
-        Clip each client's parameters and update the clip norm for next round.
+        self,
+        updates: Sequence[Mapping[str, torch.Tensor]],
+    ) -> Tuple[List[TensorDict], float]:
+        """Clip a batch of client updates and update C for the next round."""
+        norms = [global_l2_norm(u) for u in updates]
+        clipped_list: List[TensorDict] = []
 
-        Returns (clipped_params_list, current_clip_norm).
-        """
-        norms = []
-        clipped_list = []
-
-        for params in param_dicts:
-            # Compute L2 norm
-            flat = torch.cat([p.flatten() for p in params.values() if isinstance(p, torch.Tensor)])
-            l2 = float(torch.norm(flat))
-            norms.append(l2)
-
-            # Clip
-            clipped = OrderedDict()
-            scale = min(1.0, self.clip_norm / max(l2, 1e-12))
-            for name, p in params.items():
-                clipped[name] = p * scale if isinstance(p, torch.Tensor) else p
+        old_clip = float(self.clip_norm)
+        for update in updates:
+            clipped, _, _ = clip_update(update, old_clip)
             clipped_list.append(clipped)
 
-        # Fraction that were clipped (norm exceeded clip_norm)
-        fraction_clipped = sum(1 for n in norms if n > self.clip_norm) / max(len(norms), 1)
+        fraction_clipped = (
+            sum(n > old_clip for n in norms) / max(len(norms), 1)
+        )
 
-        # Geometric update: if too many clients are clipped, loosen the bound
-        # (increase C); if too few, tighten it (decrease C).
-        old_clip = self.clip_norm
-        self.clip_norm *= math.exp(
+        # Increase C when too many updates are clipped; decrease C when too
+        # few are clipped. This controls the clip norm used NEXT round.
+        new_clip = old_clip * math.exp(
             self.lr * (fraction_clipped - self.target_quantile)
         )
-        self.clip_norm = np.clip(self.clip_norm, self.min_clip, self.max_clip)
+        self.clip_norm = float(np.clip(new_clip, self.min_clip, self.max_clip))
 
         self.history.append({
-            "clip_norm": old_clip,
-            "new_clip_norm": self.clip_norm,
-            "fraction_clipped": fraction_clipped,
-            "norms": norms,
+            "clip_norm_used": old_clip,
+            "clip_norm_next": self.clip_norm,
+            "fraction_clipped": float(fraction_clipped),
+            "target_quantile": self.target_quantile,
+            "norms": [float(x) for x in norms],
         })
 
-        logger.info(
-            "AdaptiveClipper: C=%.4f→%.4f  frac_clipped=%.2f  target=%.2f",
-            old_clip, self.clip_norm, fraction_clipped, self.target_quantile,
-        )
         return clipped_list, old_clip
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 3. Top-K Gradient Sparsification with Error Feedback
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# 4. Top-K sparsification with error feedback
+# ============================================================================
+
 
 class TopKSparsifier:
-    """
-    Top-K sparsification with error feedback for communication-efficient FL.
-
-    Each client keeps a residual error buffer.  At each round:
-        1. accumulated = gradient + error_buffer
-        2. mask = top-K coordinates by magnitude
-        3. transmitted = accumulated * mask
-        4. error_buffer = accumulated * (1 − mask)   ← carried to next round
-
-    The server receives sparse updates and densifies them.
-
-    Parameters
-    ----------
-    compression_ratio : float in (0, 1]
-        Fraction of coordinates to keep.  0.01 = 1% = 100× compression.
-    """
+    """Top-K sparsification of CLIENT UPDATES with persistent error feedback."""
 
     def __init__(self, compression_ratio: float = 0.1):
-        assert 0.0 < compression_ratio <= 1.0
-        self.k_ratio = compression_ratio
-        # Per-client error buffers: client_id → list of np.ndarrays
+        ratio = float(compression_ratio)
+        if not (0.0 < ratio <= 1.0):
+            raise ValueError("compression_ratio must be in (0, 1].")
+        self.k_ratio = ratio
         self._error_buffers: Dict[int, List[np.ndarray]] = {}
+        self._shapes: Dict[int, List[Tuple[int, ...]]] = {}
 
     def sparsify(
         self,
         client_id: int,
-        param_list: List[np.ndarray],
+        update_list: Sequence[np.ndarray],
     ) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
+        """Sparsify an update vector with error feedback.
+
+        All arrays are copied to float32 for deterministic residual handling.
+        The residual is maintained per client and therefore requires persistent
+        client objects across rounds.
         """
-        Sparsify parameters with error feedback.
+        cid = int(client_id)
+        arrays = [np.asarray(x, dtype=np.float32) for x in update_list]
+        if not arrays:
+            raise ValueError("update_list must not be empty.")
+        if any(a.size == 0 for a in arrays):
+            raise ValueError("Empty tensors are not supported.")
 
-        Returns
-        -------
-        sparse_params : list of ndarrays (zeros for un-selected coordinates)
-        masks         : list of boolean ndarrays
-        actual_ratio  : fraction of non-zero coordinates
-        """
-        # Initialise error buffer on first call
-        if client_id not in self._error_buffers:
-            self._error_buffers[client_id] = [np.zeros_like(p) for p in param_list]
+        if cid not in self._error_buffers:
+            self._error_buffers[cid] = [np.zeros_like(a) for a in arrays]
+            self._shapes[cid] = [a.shape for a in arrays]
+        else:
+            if self._shapes[cid] != [a.shape for a in arrays]:
+                raise ValueError(f"Client {cid} parameter shapes changed.")
+            if len(self._error_buffers[cid]) != len(arrays):
+                raise ValueError(f"Client {cid} parameter count changed.")
 
-        accumulated = []
-        for p, e in zip(param_list, self._error_buffers[client_id]):
-            accumulated.append(p + e)
+        accumulated = [a + e for a, e in zip(arrays, self._error_buffers[cid])]
+        flat = np.concatenate([a.reshape(-1) for a in accumulated])
+        total_size = int(flat.size)
+        k = min(total_size, max(1, int(math.ceil(self.k_ratio * total_size))))
 
-        # Flatten to find global top-K
-        flat = np.concatenate([a.ravel() for a in accumulated])
-        total_size = flat.size
-        k = max(1, int(self.k_ratio * total_size))
-        # Partial sort — O(n) via argpartition
         top_indices = np.argpartition(np.abs(flat), -k)[-k:]
         mask_flat = np.zeros(total_size, dtype=bool)
         mask_flat[top_indices] = True
 
-        # Unflatten masks and build sparse output
-        sparse_params = []
-        masks = []
-        new_errors = []
-        idx = 0
+        sparse_params: List[np.ndarray] = []
+        masks: List[np.ndarray] = []
+        new_errors: List[np.ndarray] = []
+        offset = 0
+
         for a in accumulated:
-            size = a.size
-            m = mask_flat[idx:idx + size].reshape(a.shape)
-            masks.append(m)
-            sparse = np.where(m, a, 0.0)
+            size = int(a.size)
+            m = mask_flat[offset:offset + size].reshape(a.shape)
+            sparse = np.where(m, a, np.float32(0.0)).astype(np.float32, copy=False)
+            residual = np.where(m, np.float32(0.0), a).astype(np.float32, copy=False)
             sparse_params.append(sparse)
-            new_errors.append(np.where(m, 0.0, a))  # carry un-sent to buffer
-            idx += size
+            masks.append(m.copy())
+            new_errors.append(residual)
+            offset += size
 
-        self._error_buffers[client_id] = new_errors
-        actual_ratio = k / total_size
-
+        self._error_buffers[cid] = new_errors
+        actual_ratio = float(k / total_size)
         return sparse_params, masks, actual_ratio
 
     @staticmethod
-    def densify(sparse_params: List[np.ndarray]) -> List[np.ndarray]:
-        """
-        Densify sparse parameters (identity — sparse params already have
-        zeros in un-selected positions, so the server just sums them).
-        """
-        return sparse_params  # already dense with zeros
+    def densify(sparse_params: Sequence[np.ndarray]) -> List[np.ndarray]:
+        """Convert sparse arrays to float32 dense arrays for server summation."""
+        return [np.asarray(x, dtype=np.float32).copy() for x in sparse_params]
 
     def get_stats(self) -> Dict:
-        """Return compression statistics."""
         return {
             "compression_ratio": self.k_ratio,
             "active_clients": len(self._error_buffers),
             "error_buffer_norms": {
-                cid: float(np.sqrt(sum(np.sum(e**2) for e in bufs)))
+                cid: float(
+                    math.sqrt(sum(float(np.sum(e.astype(np.float64) ** 2))
+                                  for e in bufs))
+                )
                 for cid, bufs in self._error_buffers.items()
             },
         }
 
-    def reset_client(self, client_id: int):
-        """Reset error buffer for a client."""
-        if client_id in self._error_buffers:
-            del self._error_buffers[client_id]
+    def reset_client(self, client_id: int) -> None:
+        self._error_buffers.pop(int(client_id), None)
+        self._shapes.pop(int(client_id), None)
+
+    def reset(self) -> None:
+        self._error_buffers.clear()
+        self._shapes.clear()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 4. EfficientDPManager — Unified Interface
-# ═════════════════════════════════════════════════════════════════════════════
+# ============================================================================
+# 5. Unified Efficient DP manager
+# ============================================================================
+
 
 class EfficientDPManager:
-    """
-    Unified manager combining RDP accounting + adaptive clipping + calibrated
-    Gaussian noise.
+    """Unified RDP + Gaussian DP manager.
 
-    Replaces the original add_differential_privacy_noise() + cumulative_privacy_cost()
-    with tighter bounds and adaptive behaviour.
+    For BC-AWFedAvg the recommended configuration is:
+        epsilon = 1.0
+        delta = 1e-5
+        initial_clip_norm = 1.0
+        adaptive_clip = False
+
+    ``add_dp_noise`` expects a CLIENT UPDATE, not a complete model state.
     """
 
     def __init__(
@@ -371,94 +482,170 @@ class EfficientDPManager:
         epsilon: float = 1.0,
         delta: float = 1e-5,
         initial_clip_norm: float = 1.0,
-        adaptive_clip: bool = True,
+        adaptive_clip: bool = False,
         target_quantile: float = 0.6,
+        rdp_orders: Optional[Sequence[float]] = None,
     ):
-        self.epsilon = epsilon
-        self.delta = delta
-        self.rdp = RDPAccountant()
-        self.clipper = AdaptiveClipper(
-            initial_clip_norm=initial_clip_norm,
-            target_quantile=target_quantile,
-        ) if adaptive_clip else None
-        self._fixed_clip_norm = initial_clip_norm
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive.")
+        if not (0.0 < delta < 1.0):
+            raise ValueError("delta must satisfy 0 < delta < 1.")
+        if initial_clip_norm <= 0.0:
+            raise ValueError("initial_clip_norm must be positive.")
+
+        self.epsilon = float(epsilon)
+        self.delta = float(delta)
+        self.rdp = RDPAccountant(orders=rdp_orders)
+        self.clipper = (
+            AdaptiveClipper(
+                initial_clip_norm=initial_clip_norm,
+                target_quantile=target_quantile,
+            )
+            if adaptive_clip else None
+        )
+        self._fixed_clip_norm = float(initial_clip_norm)
+        self.nominal_epsilon_per_round = float(epsilon)
 
     @property
     def clip_norm(self) -> float:
-        return self.clipper.clip_norm if self.clipper else self._fixed_clip_norm
+        return float(self.clipper.clip_norm if self.clipper else self._fixed_clip_norm)
 
-    def noise_sigma(self, sensitivity: float = 1.0) -> float:
-        """Compute Gaussian noise scale for the current ε, δ, clip_norm."""
-        return math.sqrt(2 * math.log(1.25 / self.delta)) * sensitivity / self.epsilon
+    def noise_sigma(
+        self,
+        sensitivity: Optional[float] = None,
+    ) -> float:
+        """Return Gaussian standard deviation.
+
+        Uses the same calibration convention as the thesis configuration:
+
+            sigma = C * sqrt(2 ln(1.25/delta)) / epsilon
+
+        where ``C`` is the client-update clipping bound.
+        """
+        C = self.clip_norm if sensitivity is None else float(sensitivity)
+        if C <= 0.0:
+            raise ValueError("sensitivity/clip norm must be positive.")
+        return float(
+            C * math.sqrt(2.0 * math.log(1.25 / self.delta)) / self.epsilon
+        )
 
     def add_dp_noise(
         self,
-        model_params: OrderedDict,
-        sensitivity: float = 1.0,
-    ) -> OrderedDict:
-        """
-        Clip + add calibrated Gaussian noise.  Records the step in the RDP
-        accountant automatically.
-        """
-        sigma = self.noise_sigma(sensitivity)
+        client_update: Mapping[str, torch.Tensor],
+        sensitivity: Optional[float] = None,
+        clip_norm: Optional[float] = None,
+    ) -> Tuple[TensorDict, float]:
+        """Clip and noise a client update.
 
-        noised = OrderedDict()
-        for name, param in model_params.items():
-            if isinstance(param, torch.Tensor):
-                # Clip
-                pnorm = float(torch.norm(param))
-                clip = self.clip_norm
-                if pnorm > clip:
-                    param = param * (clip / pnorm)
-                noise = torch.randn_like(param) * sigma
-                noised[name] = param + noise
+        Parameters
+        ----------
+        client_update:
+            Local model minus current global model.
+        sensitivity:
+            Optional sensitivity C. Defaults to the current clip norm.
+        clip_norm:
+            Optional explicit clip norm. Defaults to the current clip norm.
+
+        Returns
+        -------
+        protected_update, sigma
+        """
+        C = self.clip_norm if clip_norm is None else float(clip_norm)
+        if C <= 0.0:
+            raise ValueError("clip_norm must be positive.")
+
+        clipped, _, _ = clip_update(client_update, C)
+        sens = C if sensitivity is None else float(sensitivity)
+        sigma = self.noise_sigma(sensitivity=sens)
+
+        protected = OrderedDict()
+        for name, value in clipped.items():
+            if torch.is_tensor(value):
+                protected[name] = value.detach().float() + torch.randn_like(value.float()) * sigma
             else:
-                noised[name] = param
+                protected[name] = value
 
-        # Record in RDP accountant
-        self.rdp.step(sigma, sensitivity)
-        return noised
+        self.rdp.step(noise_sigma=sigma, sensitivity=sens)
+        return protected, sigma
 
     def clip_client_updates(
-        self, param_dicts: List[OrderedDict]
-    ) -> Tuple[List[OrderedDict], float]:
+        self,
+        client_updates: Sequence[Mapping[str, torch.Tensor]],
+    ) -> Tuple[List[TensorDict], float]:
+        """Clip a batch of CLIENT UPDATES.
+
+        With adaptive clipping enabled, the resulting C is used for the next
+        call, exactly as recorded in ``clipper.history``.
         """
-        Adaptive clip a batch of client parameter dicts.
-        Returns (clipped_list, clip_norm_used).
-        """
-        if self.clipper:
-            return self.clipper.clip_and_update(param_dicts)
-        else:
-            # Fixed clipping
-            clipped = []
-            for params in param_dicts:
-                flat = torch.cat([p.flatten() for p in params.values()
-                                  if isinstance(p, torch.Tensor)])
-                l2 = float(torch.norm(flat))
-                scale = min(1.0, self._fixed_clip_norm / max(l2, 1e-12))
-                clipped.append(OrderedDict(
-                    (n, p * scale if isinstance(p, torch.Tensor) else p)
-                    for n, p in params.items()
-                ))
-            return clipped, self._fixed_clip_norm
+        if self.clipper is not None:
+            return self.clipper.clip_and_update(client_updates)
+
+        clipped: List[TensorDict] = []
+        for update in client_updates:
+            c, _, _ = clip_update(update, self._fixed_clip_norm)
+            clipped.append(c)
+        return clipped, self._fixed_clip_norm
 
     def get_epsilon(self) -> float:
-        """Current cumulative ε using RDP accounting."""
         return self.rdp.get_epsilon(self.delta)
 
     def privacy_report(self) -> Dict:
-        """Full privacy report with RDP vs AC comparison."""
-        report = self.rdp.privacy_report(self.delta)
+        report = self.rdp.privacy_report(
+            delta=self.delta,
+            nominal_epsilon_per_round=self.nominal_epsilon_per_round,
+        )
+        report["epsilon_per_round_nominal"] = self.nominal_epsilon_per_round
+        report["clip_norm_current"] = self.clip_norm
+        report["adaptive_clipping"] = self.clipper is not None
         report["adaptive_clip_history"] = (
-            self.clipper.history if self.clipper else []
+            list(self.clipper.history) if self.clipper else []
         )
         return report
 
-    def reset(self):
+    def reset(self) -> None:
         self.rdp.reset()
-        if self.clipper:
+        if self.clipper is not None:
+            current = self.clipper.clip_norm
             self.clipper = AdaptiveClipper(
-                initial_clip_norm=self.clipper.clip_norm,
+                initial_clip_norm=current,
                 target_quantile=self.clipper.target_quantile,
                 learning_rate=self.clipper.lr,
+                min_clip=self.clipper.min_clip,
+                max_clip=self.clipper.max_clip,
             )
+
+
+# ============================================================================
+# 6. Backward-compatible helper
+# ============================================================================
+
+
+def add_differential_privacy_noise(
+    client_update: Mapping[str, torch.Tensor],
+    epsilon: float = 1.0,
+    delta: float = 1e-5,
+    clip_norm: float = 1.0,
+) -> Tuple[TensorDict, float]:
+    """Stateless compatibility wrapper.
+
+    The input is explicitly a CLIENT UPDATE. It returns ``(protected, sigma)``.
+    """
+    manager = EfficientDPManager(
+        epsilon=epsilon,
+        delta=delta,
+        initial_clip_norm=clip_norm,
+        adaptive_clip=False,
+    )
+    return manager.add_dp_noise(client_update)
+
+
+__all__ = [
+    "RDPAccountant",
+    "AdaptiveClipper",
+    "TopKSparsifier",
+    "EfficientDPManager",
+    "global_l2_norm",
+    "subtract_state",
+    "clip_update",
+    "add_differential_privacy_noise",
+]
