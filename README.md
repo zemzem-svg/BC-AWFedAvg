@@ -1,4 +1,5 @@
-BC-AWFedAvg corrected canonical files
+BC-AWFedAvg contribution
+
 ====================================
 
 Core protocol files
