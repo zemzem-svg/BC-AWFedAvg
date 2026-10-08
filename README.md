@@ -1,166 +1,79 @@
-# Blockchain-Enabled Adaptive Weighted FedAvg
+BC-AWFedAvg corrected canonical files
+====================================
 
-Privacy-preserving federated reinforcement learning for wireless network resource allocation (eMBB/URLLC scheduling), combining **AdaptiveWeightedFedAvg** with a **blockchain + IPFS** audit and privacy layer.
+Core protocol files
+-------------------
+blockchain_awfedavg.py
+  - canonical two-phase BC-AWFedAvg orchestrator
+  - five-criterion adaptive weighting
+  - persistent reputation-aware weighting
+  - client-update DP before weighting
+  - weight-before-mask secure aggregation
+  - gradual isolation/TTI tracking at theta_iso = 1/(2K)
 
----
+secure_aggregation.py
+  - independent persistent pairwise secrets
+  - additive pairwise-cancelling masks
+  - server-side sum only
+  - explicit research-prototype scope limitations
 
-## Project Structure
+efficient_dp.py
+  - client/update Gaussian DP
+  - RDP accounting
+  - optional Top-K sparsification
 
-```
-blockchain_awfedavg/
-│
-├── blockchain_awfedavg_true_integration.py   ← MAIN ENTRY POINT
-├── adaptive_weighted_fedavg.py               ← AWFedAvg strategy + Flower client
-├── privacy_blockchain_fl.py                  ← DP + encryption + IPFS + blockchain
-├── gym_phy_env.py                            ← Gymnasium wrapper for Phy environment
-├── phy_env_class.py                          ← Core wireless network simulator
-│
-├── phy/                                      ← Internal package (auto-discovered)
-│   ├── common/
-│   │   ├── common_dict.py                    ← Node/traffic type definitions
-│   │   └── common_method.py                  ← Fading, noise, geometry helpers
-│   └── scenario/
-│       ├── resources.py                      ← 5G-NR resource block definitions
-│       ├── nodes.py                          ← Base station & user node classes
-│       ├── cells.py                          ← Cell class
-│       ├── cluster.py                        ← Multi-cell cluster + channel model
-│       └── waterfilling.py                   ← Water-filling resource allocation
-│
-├── contracts/
-│   └── FederatedLearningContract.sol         ← Solidity smart contract
-│
-└── requirements.txt
-```
+privacy_blockchain_fl.py
+  - Ethereum/Ganache governance interface
+  - contribution metadata
+  - on-chain reputation-target submission
+  - AES-256-GCM + RSA-4096 off-chain encryption
+  - IPFS publication
+  - separate publication-level DP
 
+deploy.py
+  - solcx/Web3 deployment
+  - writes contract_info.json without private keys
+  - records BC-AWFedAvg reputation/isolation configuration
 
+contracts/FederatedLearningContract.sol
+  - metadata-only governance contract
+  - reputation recurrence: rho_t = 0.85 rho_(t-1) + 0.15 g_t
+  - reputation represented on a 0..1000 scale
+  - initial reputation = 1000/K
+  - no hard minimum-reputation participation gate
+  - isolation is measured from aggregation weight, not client deactivation
 
-## Architecture
+Important thesis-consistency note
+---------------------------------
+The thesis version that explicitly specifies the reputation dynamics uses a
+leaky-integrator recurrence with beta=0.85. It describes g(.) as a bounded
+function of E/R/S signals but does not provide a unique closed-form g(.).
+The canonical runner therefore uses the arithmetic mean of the normalized
+E/R/S scores as a reproducible operationalization.
 
-```
-BlockchainAdaptiveWeightedFedAvg
-        │  inherits
-        ▼
-AdaptiveWeightedFedAvg          (4-criteria adaptive weights: eMBB, URLLC,
-        │                        activation diversity, stability)
-        │  aggregate_fit() adds:
-        │   1. start_round_on_chain()
-        │   2. super().aggregate_fit()  ← full AWFedAvg unchanged
-        │   3. coordinator DP → encrypt → IPFS → submit_aggregated_model_on_chain()
-        ▼
+The latest thesis PDF version available in the file set describes the reputation
+mechanism qualitatively as gradual and defines theta_iso = 1/(2K), but does not
+repeat the beta=0.85 recurrence. The explicit beta=0.85 implementation above
+therefore follows the thesis version that actually defines the recurrence.
 
-BlockchainEnhancedFlowerClient
-        │  inherits
-        ▼
-EnhancedFlowerClient            (PPO training, ResourceMonitor, evaluate_model_simple)
-        │  fit() adds:
-        │   1. super().fit()  ← full client training unchanged
-        │   2. client DP → clip_gradients → encrypt → IPFS → submit_local_update_on_chain()
-        ▼
-```
+Reputation / TTI synchronization
+--------------------------------
+The canonical experiment runner explicitly documents and records:
+  - s_rep,k^(t) = rho_k^(t) / sum_j rho_j^(t)
+  - rho_k^(t) = beta*rho_k^(t-1) + (1-beta)*g(E_k^(t),R_k^(t),S_k^(t))
+  - beta = 0.85
+  - w_k^(0) = 1/K
+  - five criteria alpha = (0.22, 0.38, 0.20, 0.15, 0.05)
+  - eta = 0.7 exponential weight smoothing
+  - theta_iso = 1/(2K)
+  - TTI_k = first round with w_k^(t) < theta_iso
+  - reputation is gradual influence control, not binary client exclusion
 
-DP-noised parameters go to IPFS only. Flower receives the original parameters so AWFedAvg's adaptive weighting stays accurate.
+The current thesis specifies g(.) as a bounded function of E/R/S-related scores,
+but does not give a unique closed-form definition of g. The implementation uses
+the arithmetic mean of the normalized E/R/S scores as an explicit reproducibility
+convention. This distinction is recorded so the repository does not incorrectly
+claim that the chosen g(.) expression is copied verbatim from the thesis.
 
----
-
-## Quick Start
-
-### 1. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Start infrastructure (for blockchain + IPFS)
-
-```bash
-# Local Ethereum node
-ganache-cli --accounts 10 --deterministic --networkId 1337
-
-# IPFS daemon
-ipfs daemon &
-```
-
-### 3. Deploy smart contract
-
-```bash
-npm install --save-dev hardhat
-npx hardhat init
-cp contracts/FederatedLearningContract.sol contracts/
-npx hardhat run scripts/deploy.js --network localhost
-```
-
-### 4. Run experiment
-
-**Without blockchain** (local testing, DP still active):
-```python
-from blockchain_awfedavg_true_integration import run_blockchain_awfedavg_experiment
-
-hist, local, fed, resources = run_blockchain_awfedavg_experiment(
-    blockchain_enabled=False,
-    epsilon=1.0, delta=1e-5, clip_norm=1.0,
-)
-```
-
-**With blockchain**:
-```python
-hist, local, fed, resources = run_blockchain_awfedavg_experiment(
-    blockchain_enabled=True,
-    blockchain_provider="http://localhost:8545",
-    contract_address="0x...",
-    contract_abi_path="contract_info.json",
-    coordinator_private_key="0x...",
-    epsilon=1.0, delta=1e-5, clip_norm=1.0,
-    alpha_embb=0.3, alpha_urllc=0.3,
-    alpha_activation=0.2, alpha_stability=0.2,
-)
-```
-
-Or use the factory directly for full control:
-```python
-from blockchain_awfedavg_true_integration import (
-    create_blockchain_awfedavg_strategy,
-    make_blockchain_client_fn,
-)
-
-strategy = create_blockchain_awfedavg_strategy(
-    blockchain_enabled=True,
-    contract_address="0x...",
-    coordinator_private_key="0x...",
-)
-client_fn = make_blockchain_client_fn(strategy.ppfl)
-```
-
----
-
-## AWFedAvg Weight Criteria
-
-| Criterion | Default α | Meaning |
-|---|---|---|
-| eMBB outage | 0.22 | Clients with fewer eMBB outages get higher weight |
-| URLLC residual | 0.38 | Clients with lower undelivered URLLC packets get higher weight |
-| Activation diversity | 0.20 | Clients with more diverse traffic loads contribute more |
-| Performance stability | 0.20 | Clients with stable reward history get higher weight |
-
-Weights are smoothed across rounds (factor 0.7) to prevent oscillation.
-
----
-
-## Privacy Guarantees
-
-- **Client-side**: gradient clipping + Gaussian noise `(ε, δ)-DP` applied before IPFS upload
-- **Coordinator-side**: additional DP noise on the aggregated global model before publishing
-- **Encryption**: Fernet symmetric encryption with per-upload keys
-- **Blockchain**: SHA-256 model hash registered on-chain for tamper detection
-
----
-
-## Key Configuration
-
-| Parameter | Default | Description |
-|---|---|---|
-| `epsilon` | 1.0 | DP privacy budget (lower = more private) |
-| `delta` | 1e-5 | DP failure probability |
-| `clip_norm` | 1.0 | L2 gradient clipping bound |
-| `NUM_CLIENTS` | 3 | Total simulated FL clients |
-| `TOTAL_ROUNDS` | 10 | Federated learning rounds |
-| `LOCAL_EPOCHS` | 100 | PPO timestep multiplier per local round |
+The runner also writes results/thesis_protocol_spec.json so the equations and runtime
+parameters used by an experiment are preserved alongside the numerical results.
